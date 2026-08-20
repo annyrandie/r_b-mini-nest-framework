@@ -7,6 +7,11 @@ export type Type<T = unknown> = new (...args: any[]) => T;
 
 export type Resolvable<T = unknown> = Type<T> | InjectionToken;
 
+interface ResolutionFrame {
+  ctor: Type;
+  name: string;
+}
+
 export class CircularDependencyError extends Error {
   constructor(chain: string[]) {
     super(`Circular dependency detected: ${chain.join(' -> ')}`);
@@ -30,7 +35,7 @@ export class Container {
     return this.resolveInternal(target, []);
   }
 
-  private resolveInternal<T>(target: Resolvable<T>, path: string[]): T {
+  private resolveInternal<T>(target: Resolvable<T>, path: ResolutionFrame[]): T {
     if (typeof target === 'string' || typeof target === 'symbol') {
       return this.resolveToken(target, path);
     }
@@ -38,7 +43,7 @@ export class Container {
     return this.resolveClass(target as Type<T>, path);
   }
 
-  private resolveToken<T>(token: InjectionToken, path: string[]): T {
+  private resolveToken<T>(token: InjectionToken, path: ResolutionFrame[]): T {
     if (!this.valueProviders.has(token)) {
       throw new Error(`No provider registered for token "${tokenName(token)}". Did you call container.register(token, value)?`);
     }
@@ -51,11 +56,12 @@ export class Container {
     return provider as T;
   }
 
-  private resolveClass<T>(ctor: Type<T>, path: string[]): T {
+  private resolveClass<T>(ctor: Type<T>, path: ResolutionFrame[]): T {
     const name = ctor.name;
 
-    if (path.includes(name)) {
-      throw new CircularDependencyError([...path, name]);
+    const cycleAt = path.findIndex((frame) => frame.ctor === ctor);
+    if (cycleAt !== -1) {
+      throw new CircularDependencyError([...path.slice(cycleAt).map((frame) => frame.name), name]);
     }
 
     if (!Reflect.getMetadata(INJECTABLE_METADATA_KEY, ctor)) {
@@ -68,7 +74,7 @@ export class Container {
       return this.singletons.get(ctor) as T;
     }
 
-    const nextPath = [...path, name];
+    const nextPath = [...path, { ctor, name }];
 
     const paramTypes: Type[] = Reflect.getMetadata('design:paramtypes', ctor) || [];
     const injectTokens: (InjectionToken | undefined)[] =
