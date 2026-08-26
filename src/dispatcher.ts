@@ -1,8 +1,9 @@
 import 'reflect-metadata';
 import http from 'node:http';
 import type { Container, Type } from './container';
-import { buildRoutes, matchRoute } from './router';
+import { buildRoutes, matchRoute, type CompiledRoute } from './router';
 import { validateBody } from './pipes/validation.pipe';
+import { HttpError } from './http-error';
 
 function readJsonBody(req: http.IncomingMessage): Promise<unknown> {
   return new Promise((resolve, reject) => {
@@ -34,6 +35,48 @@ function sendJson(res: http.ServerResponse, status: number, body: unknown): void
   res.end(payload);
 }
 
+async function resolveArgs(route: CompiledRoute, params: Record<string, string>, url: URL, req: http.IncomingMessage): Promise<unknown[]> {
+  const needsBody = Object.values(route.paramDefs).some((def) => def.source === 'body');
+
+  let body: unknown;
+  try {
+    body = needsBody ? await readJsonBody(req) : undefined;
+  } catch (error) {
+    throw new HttpError(400, error instanceof Error ? error.message : 'Invalid JSON body');
+  }
+
+  const args: unknown[] = [];
+  for (let index = 0; index < route.paramTypes.length; index++) {
+    const def = route.paramDefs[index];
+    if (!def) continue;
+
+    if (def.source === 'param') {
+      args[index] = def.name ? params[def.name] : undefined;
+    } else if (def.source === 'query') {
+      args[index] = def.name ? url.searchParams.get(def.name) ?? undefined : undefined;
+    } else if (def.source === 'body') {
+      const dtoClass = route.paramTypes[index] as Type<object>;
+      const result = validateBody(dtoClass, body);
+      if (!result.ok) {
+        throw new HttpError(400, 'Validation failed', result.errors);
+      }
+      args[index] = result.value;
+    }
+  }
+
+  return args;
+}
+
+async function invokeHandler(route: CompiledRoute, args: unknown[]): Promise<unknown> {
+  const handler = (route.controller as Record<string | symbol, (...a: unknown[]) => unknown>)[route.handlerName];
+  try {
+    return await handler.apply(route.controller, args);
+  } catch (error) {
+    console.error(`[dispatcher] handler "${String(route.handlerName)}" threw:`, error);
+    throw new HttpError(500, 'Internal server error');
+  }
+}
+
 export function createApp(container: Container, controllers: Type<object>[]): http.Server {
   const routes = buildRoutes(container, controllers);
 
@@ -43,42 +86,23 @@ export function createApp(container: Container, controllers: Type<object>[]): ht
         const method = (req.method ?? 'GET').toUpperCase();
         const url = new URL(req.url ?? '/', 'http://localhost');
         const match = matchRoute(routes, method, url.pathname);
-
         if (!match) {
           sendJson(res, 404, { message: `Cannot ${method} ${url.pathname}` });
           return;
         }
 
         const { route, params } = match;
-        const needsBody = Object.values(route.paramDefs).some((def) => def.source === 'body');
-        const body = needsBody ? await readJsonBody(req) : undefined;
-
-        const args: unknown[] = [];
-        for (let index = 0; index < route.paramTypes.length; index++) {
-          const def = route.paramDefs[index];
-          if (!def) continue;
-
-          if (def.source === 'param') {
-            args[index] = def.name ? params[def.name] : undefined;
-          } else if (def.source === 'query') {
-            args[index] = def.name ? url.searchParams.get(def.name) ?? undefined : undefined;
-          } else if (def.source === 'body') {
-            const dtoClass = route.paramTypes[index] as Type<object>;
-            const result = validateBody(dtoClass, body);
-            if (!result.ok) {
-              sendJson(res, 400, { message: 'Validation failed', errors: result.errors });
-              return;
-            }
-            args[index] = result.value;
-          }
-        }
-
-        const handler = (route.controller as Record<string | symbol, (...a: unknown[]) => unknown>)[route.handlerName];
-        const result = await handler.apply(route.controller, args);
+        const args = await resolveArgs(route, params, url, req);
+        const result = await invokeHandler(route, args);
 
         sendJson(res, method === 'POST' ? 201 : 200, result);
       } catch (error) {
-        sendJson(res, 400, { message: error instanceof Error ? error.message : 'Bad request' });
+        if (error instanceof HttpError) {
+          sendJson(res, error.status, error.details === undefined ? { message: error.message } : { message: error.message, errors: error.details });
+          return;
+        }
+        console.error('[dispatcher] unexpected error:', error);
+        sendJson(res, 500, { message: 'Internal server error' });
       }
     })();
   });

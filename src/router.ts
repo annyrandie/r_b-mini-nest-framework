@@ -53,13 +53,26 @@ export interface MatchedRoute {
   params: Record<string, string>;
 }
 
+function specificity(route: CompiledRoute): number[] {
+  return route.segments.map((segment) => (segment.startsWith(':') ? 1 : 0));
+}
+
+function bySpecificity(a: CompiledRoute, b: CompiledRoute): number {
+  const [scoreA, scoreB] = [specificity(a), specificity(b)];
+  for (let i = 0; i < scoreA.length; i++) {
+    if (scoreA[i] !== scoreB[i]) return scoreA[i] - scoreB[i];
+  }
+  return 0;
+}
+
 export function matchRoute(routes: CompiledRoute[], httpMethod: string, pathname: string): MatchedRoute | undefined {
   const requestSegments = pathname.split('/').filter(Boolean);
 
-  for (const route of routes) {
-    if (route.httpMethod !== httpMethod) continue;
-    if (route.segments.length !== requestSegments.length) continue;
+  const candidates = routes
+    .filter((route) => route.httpMethod === httpMethod && route.segments.length === requestSegments.length)
+    .sort(bySpecificity);
 
+  for (const route of candidates) {
     const params: Record<string, string> = {};
     const isMatch = route.segments.every((segment, index) => {
       if (segment.startsWith(':')) {
