@@ -2,7 +2,8 @@ import 'reflect-metadata';
 import { Controller } from '../decorators/controller';
 import { Get, Post } from '../decorators/methods';
 import { Body, Param, Query } from '../decorators/params';
-import { CreateUserDto } from '../dto/create-user.dto';
+import { createUserSchema, type CreateUserDto } from '../dto/create-user.dto';
+import { NotFoundError } from '../errors/not-found.error';
 import { UsersService, type User } from '../services/users.service';
 
 @Controller('users')
@@ -15,12 +16,16 @@ export class UsersController {
   }
 
   @Get(':id')
-  getOne(@Param('id') id: string): { id: string; user: User | null } {
-    return { id, user: this.usersService.findById(id) ?? null };
+  getOne(@Param('id') id: string): { id: string; user: User } {
+    const user = this.usersService.findById(id);
+    if (!user) {
+      throw new NotFoundError(`User "${id}" was not found`);
+    }
+    return { id, user };
   }
 
   @Post()
-  create(@Body() dto: CreateUserDto): User {
+  create(@Body(createUserSchema) dto: CreateUserDto): User {
     return this.usersService.create(dto);
   }
 }
